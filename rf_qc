@@ -1,0 +1,564 @@
+"""
+Created on Fri Jan 25 12:59:51 2019
+
+@author: jcoffey
+
+quality control of receiver functions adapted from Schulte-Pelkum and Mahan 2014
+
+"the radial component receiver function shows a positive polarity direct P 
+arrival that is the largest arrival in the receiver function"
+
+"the receiver function amplitude does not exceed 2"
+
+"any arrivals' pulse length does not exceed 3.5s"
+
+"""
+
+from obspy import read, Stream, Trace
+import numpy as np
+import matplotlib
+from matplotlib import pyplot as plt
+import glob
+import os
+from subprocess import call
+from mpl_toolkits.basemap import Basemap
+from mpl_toolkits.axes_grid1 import make_axes_locatable
+import pandas as pd
+
+
+#fi = 'Event_2013_07_17_02_37_43_AK.BARK..ITR.sac'
+my_dir = '/home/jcoffey/Research/Receiver_Fn/Canoe_Reach/Events'
+my_onlydeci_dir = '/home/jcoffey/Research/Receiver_Fn/Canoe_Reach/Events_onlydeci'
+os.chdir(my_dir)
+pre_filt = 'a5'
+station_list = ['CRG01','CRG02','CRG03','CRG04','CRG05','CRG10','CRG11','CRG12','CRG13','CRG14']
+#station_list = ['CRG02']
+
+df = pd.read_excel('/home/jcoffey/Research/Receiver_Fn/Canoe_Reach/station_locations.xlsx')
+
+for station in station_list:
+    z_files = os.path.join(my_dir,'*%s*.z' %station)
+    z_files = glob.glob(z_files)
+    z_files.sort()
+    
+    r_files = os.path.join(my_dir,'*%s*.r' %station)
+    r_files = glob.glob(r_files)
+    r_files.sort()
+    
+    t_files = os.path.join(my_dir,'*%s*.t' %station)
+    t_files = glob.glob(t_files)
+    t_files.sort()
+    
+    ITR_files = os.path.join(my_dir,'*%s*%s.itr' %(station,pre_filt))
+    ITR_files = glob.glob(ITR_files)
+    ITR_files.sort()
+    
+    ITT_files = os.path.join(my_dir,'*%s*%s.itt' %(station,pre_filt))
+    ITT_files = glob.glob(ITT_files)
+    ITT_files.sort()
+    
+    #some labeled as HHN/HHE some as HHY/HHX 
+    
+    HHN_files = os.path.join(my_onlydeci_dir,'*%s*HH[N,Y]*' %station)
+    HHN_files = glob.glob(HHN_files)
+    HHN_files.sort()
+
+    HHE_files_og = os.path.join(my_onlydeci_dir,'*%s*HH[E,X]*' %station)
+    HHE_files_og = glob.glob(HHE_files_og)
+    HHE_files_og.sort()
+    
+    HHZ_files = os.path.join(my_onlydeci_dir,'*%s*HHZ*' %station)
+    HHZ_files = glob.glob(HHZ_files)
+    HHZ_files.sort()
+    
+    rflen = 400
+    
+    
+    #params for receiver function qc
+    fi_num = -1
+    trim = 40   #trims to only first 'trim' in seconds
+    pulse_thresh = 10 #length of allowed pulse length in seconds
+    bound = 0 #define pulse bounds
+    keep_ind = []
+    keep_ind2 = []
+    
+    snr_count = 0
+    snr_list = []
+    
+    
+    p1 = len(HHE_files_og)
+    p2 = len(HHN_files)
+        
+    e_events = []
+    n_events = []
+    
+    for p in range(0,p1):
+    #finding where HHE and HHN files do not line up
+        e_eve = HHE_files_og[p]
+        e_eve = e_eve.split('/')
+        e_eve = e_eve[7].split('_BG')
+        e_events.append(e_eve[0])
+        
+    for p in range(0,p2):
+        n_eve = HHN_files[p]
+        n_eve = n_eve.split('/')
+        n_eve = n_eve[7].split('_BG')
+        n_events.append(n_eve[0])
+    
+    
+    indicies = []
+    for t in range(0,p1):
+        if e_events[t] in n_events:
+            indicies.append(t)
+    
+    HHE_files = []
+    for i in range(0,len(indicies)):
+        HHE_files.append(HHE_files_og[indicies[i]])
+    
+    
+    
+    for z in range(0,len(ITR_files)):
+        #qc on raw traces
+        
+        st_z = read(HHZ_files[z])
+        st_z_onlydeci = st_z.copy()
+        
+        #pre detrend, taper, filter, and decimate
+        st_z[0].detrend('linear')
+        st_z[0].taper(0.03)
+        st_z[0].filter('bandpass',freqmin=0.05,freqmax=5,zerophase=True,corners=4)
+        
+        eve1 = HHZ_files[z]
+        eve1 = eve1.split('/')
+        event1 = eve1[7].split('_BG')
+        event1 = event1[0]
+        
+        delta = st_z[0].stats.sampling_rate
+        srflen = int(rflen*delta) 
+        sparr = int(st_z[0].stats.sac.t4 - st_z[0].stats.sac.b) #expected P arr from tau_p in seconds
+        parr = int(sparr*delta) #expected p arr in points
+        #delwin = win*delta
+          
+        #initiazlie 
+        #SNR_Z = np.zeros(len(st_z[0]))
+          
+        #windows defined by Schulte_Pelkum & Mahan 2014
+        #sig_left = int(sparr-(5*delta))                  #5 seconds before P (in points)
+        sig_left = int(parr - (5*delta))
+        sig_right = int(parr+(25*delta))                #25 seconds after P  (in points)
+        if int(parr - (35*delta)) > 0:
+            noise_left = int(parr-(35*delta))               #35 seconds before P (in points)
+        else:
+            noise_left = 0                               #setting to 0 if there is not 35 s of signal before P
+        noise_right = int(parr-(5*delta))               #5 seconds before P
+        
+        #SNR for Z 
+        #sgn = st_z[0].data[sparr_unrot:sparr+srflen]
+        #st_z = st_z.filter('bandpass',freqmin=0.25,freqmax=5,zerophase=True,corners=4) #filter defined by Schulte-Pelkum & Mahan
+        st_z[0].data = st_z[0].data[0:srflen]
+        sgn = st_z[0].data[sig_left:sig_right]
+        nse = st_z[0].data[noise_left:noise_right]
+        #Pow_s = np.sum(sgn**2/srflen)
+        #Pow_n = np.sum(nse**2/srflen)
+        rms_sgn = np.sqrt(np.mean(np.power(sgn,2)))
+        rms_nse = np.sqrt(np.mean(np.power(nse,2)))
+        SNR_Z = rms_sgn/rms_nse
+        
+        #adding in E and N components
+        
+        #SNR for E
+        st_e = read(HHE_files[z])
+        
+        st_e_onlydeci = st_e.copy()
+        
+        #pre detrend, taper, filter, and decimate
+        st_e[0].detrend('linear')
+        st_e[0].taper(0.03)
+        st_e[0].filter('bandpass',freqmin=0.05,freqmax=5,zerophase=True,corners=4)
+        
+        
+        eve3 = HHE_files[z]
+        eve3 = eve3.split('/')
+        event3 = eve3[7].split('_BG')
+        event3 = event3[0]
+        
+        tr_e = st_e[0]
+        #tr_e.filter('bandpass',freqmin=0.25,freqmax=5,zerophase=True,corners=4)
+        #SNR_E = np.zeros(len(st_e[0]))
+          
+        #windows defined by Schulte_Pelkum & Mahan 2014
+        #sig_left = int(sparr-(5*delta))                  #5 seconds before P (in points)
+        sig_left = int(parr - (5*delta))
+        sig_right = int(parr+(25*delta))                #25 seconds after P  (in points)
+        if int(parr - (35*delta)) > 0:
+            noise_left = int(parr-(35*delta))               #35 seconds before P (in points)
+        else:
+            noise_left = 0                               #setting to 0 if there is not 35 s of signal before P
+        noise_right = int(parr-(5*delta))               #5 seconds before P
+        #sgn = st_z[0].data[sparr_unrot:sparr+srflen]
+        #st_z = st_z.filter('bandpass',freqmin=0.25,freqmax=5,zerophase=True,corners=4) #filter defined by Schulte-Pelkum & Mahan
+        st_e[0].data = st_e[0].data[0:srflen]
+        sgn = st_e[0].data[sig_left:sig_right]
+        nse = st_e[0].data[noise_left:noise_right]
+        #Pow_s = np.sum(sgn**2/srflen)
+        #Pow_n = np.sum(nse**2/srflen)
+        rms_sgn = np.sqrt(np.mean(np.power(sgn,2)))
+        rms_nse = np.sqrt(np.mean(np.power(nse,2)))
+        SNR_E = rms_sgn/rms_nse
+        
+        #SNR for N
+        st_n = read(HHN_files[z])
+        st_n_onlydeci = st_n.copy()
+        st_n[0].detrend('linear')
+        st_n[0].taper(0.03)
+        st_n[0].filter('bandpass',freqmin=0.05,freqmax=5,zerophase=True,corners=4)
+        
+        eve4 = HHN_files[z]
+        eve4 = eve4.split('/')
+        event4 = eve4[7].split('_BG')
+        event4 = event4[0]
+        
+        tr_n = st_n[0]
+        st_n[0].data = st_n[0].data[0:srflen]
+        sgn = st_n[0].data[sig_left:sig_right]
+        nse = st_n[0].data[noise_left:noise_right]
+        #Pow_s = np.sum(sgn**2/srflen)
+        #Pow_n = np.sum(nse**2/srflen)
+        rms_sgn = np.sqrt(np.mean(np.power(sgn,2)))
+        rms_nse = np.sqrt(np.mean(np.power(nse,2)))
+        SNR_N = rms_sgn/rms_nse
+        
+        #SNR Raw Z
+        #st_z_onlydeci = read(Z_onlydeci[z])
+        tr_z_onlydeci = st_z_onlydeci[0]
+        #SNR_Z_onlydeci = np.zeros(len(st_z_onlydeci[0]))
+          
+        #noise_right = int(parr-(5*delta))               #5 seconds before P
+        st_z_onlydeci[0].data = st_z_onlydeci[0].data[0:srflen]
+        sgn = st_z_onlydeci[0].data[sig_left:sig_right]
+        nse = st_z_onlydeci[0].data[noise_left:noise_right]
+        rms_sgn = np.sqrt(np.mean(np.power(sgn,2)))
+        rms_nse = np.sqrt(np.mean(np.power(nse,2)))
+        SNR_Z_onlydeci = rms_sgn/rms_nse
+        
+        #SNR Raw E 
+        #st_e_onlydeci = read(E_onlydeci[z])
+        tr_e_onlydeci = st_e_onlydeci[0]
+        #SNR_E = np.zeros(len(st_e_onlydeci[0]))
+        st_e_onlydeci[0].data = st_e_onlydeci[0].data[0:srflen]
+        sgn = st_e_onlydeci[0].data[sig_left:sig_right]
+        nse = st_e_onlydeci[0].data[noise_left:noise_right]
+        rms_sgn = np.sqrt(np.mean(np.power(sgn,2)))
+        rms_nse = np.sqrt(np.mean(np.power(nse,2)))
+        SNR_E_onlydeci = rms_sgn/rms_nse
+        
+        #SNR Raw N
+        #st_n_onlydeci = read(N_onlydeci[z])
+        tr_n_onlydeci = st_n_onlydeci[0]
+        #SNR_N = np.zeros(len(st_n_onlydeci[0]))
+        st_n_onlydeci[0].data = st_n_onlydeci[0].data[0:srflen]
+        sgn = st_n_onlydeci[0].data[sig_left:sig_right]
+        nse = st_n_onlydeci[0].data[noise_left:noise_right]
+        rms_sgn = np.sqrt(np.mean(np.power(sgn,2)))
+        rms_nse = np.sqrt(np.mean(np.power(nse,2)))
+        SNR_N_onlydeci = rms_sgn/rms_nse
+   
+        
+        #qc on receiver functions
+        word = 'keep'
+        fi_num = fi_num + 1
+        st = read(ITR_files[z])
+        tr_full=st[0]
+        
+        #get event name
+        eve = ITR_files[z]
+        eve = eve.split('/')
+        event = eve[7].split('_BG')
+        event = event[0]
+        
+        tr=tr_full.copy()
+        start = tr_full.stats.starttime
+        #tr.trim(starttime=start,endtime=start+trim,pad=False,nearest_sample=True,fill_value=None)
+        delta = tr.stats.sampling_rate
+        
+        peak = np.max(tr.data)
+        all_peak = np.max(np.abs(tr.data))
+        ind = tr.data.argmax(0)
+        
+        
+        '''
+        if SNR_E <= 1.5:
+            word = 'SNR E below 1.5'
+            #snr_list.append(SNR_Z)
+            #snr_count = snr_count+1
+            
+        if SNR_N <= 1.5:
+            word = 'SNR N below 1.5'
+        '''
+        if SNR_E < 2 and SNR_N < 2:
+            word = 'Poor horizontal SNR'
+
+        if (SNR_E < 2 and SNR_N > 2) or (SNR_N < 2 and SNR_E > 2):
+            word = 'keep'
+        
+        if SNR_E >= 1.5 and SNR_N >= 1.5:
+            word = 'keep'
+            
+        #SNR
+        '''
+        if SNR_Z <= 1.75:
+            word = 'SNR Z below 1.75'
+            #snr_list.append(SNR_Z)
+            #snr_count = snr_count+1
+        '''
+        
+        if word == 'keep':
+            snr_list.append(SNR_Z)
+        
+        #variance reduction    
+        
+        if word == 'keep':
+            if tr.stats.sac.user9 < 60:
+               snr_count = snr_count + 1
+               snr_list.append(tr.stats.sac.user9) 
+               word = 'variance reduction < 60%' 
+       
+    
+        #negative first motion
+        if word == 'keep':
+            for k in range(0,int(10*delta)):             #only looking at first 10 seconds
+                if tr[k] < -0.001:
+                    word = 'negative first motion'
+                    break
+
+                
+        #peak not at 10s or too large of a negatvie     
+        if word == 'keep':
+            if ind/delta > 10.5 or peak != all_peak:
+                word = 'largest peak not P'
+            
+        if word == 'keep':
+            keep_ind.append(fi_num)
+
+
+        
+        #for plotting
+        '''
+        if word == 'keep':
+        #if event == '2017_11_13_2_37':
+        #if tr_z_onlydeci.stats.sac.baz < 100:  
+    
+            fig = plt.figure()
+            #plotting raw
+            ax_r1 = fig.add_subplot(10,1,1)
+            ax_r1.plot(tr_z_onlydeci.times('relative'),tr_z_onlydeci.data)
+            ax_r1.set_ylabel('Raw Z, %0.2f' %SNR_Z_onlydeci,fontsize=14)
+            ax_r1.set_xlim([60,200])  
+            #ax_r1.set_title('SNR Z: %.02f, SNR E: %0.2f, SNR N: %0.2f, variance reduction: %.02f' %(SNR_Z,SNR_E,SNR_N,tr.stats.sac.user9), fontsize=14)
+            ax_r1.set_title('%s var. reduct. %s' %(event,tr.stats.sac.user9), fontsize=14)
+            ax_r1.axvline(x=sparr,color='r')
+            ax_r1.axvline(x=sig_right/delta,color='r',linestyle='dashed')
+            ax_r1.axvline(x=sig_left/delta,color='r',linestyle='dashed')
+            ax_r1.axvline(x=noise_left/delta,color='b',linestyle='dashed')
+            ax_r1.axvline(x=noise_right/delta,color='b',linestyle='dashed')
+            ax_r1.legend(['%s' %event1])
+            ax_r1.grid()
+            
+            ax_r2 = fig.add_subplot(10,1,2)
+            ax_r2.plot(tr_e_onlydeci.times('relative'),tr_e_onlydeci.data)
+            ax_r2.set_ylabel('Raw E, %0.2f' %SNR_E_onlydeci,fontsize=14)
+            ax_r2.set_xlim([60,200]) 
+            ax_r2.axvline(x=sparr,color='r')
+            ax_r2.axvline(x=sig_right/delta,color='r',linestyle='dashed')
+            ax_r2.axvline(x=sig_left/delta,color='r',linestyle='dashed')
+            ax_r2.axvline(x=noise_left/delta,color='b',linestyle='dashed')
+            ax_r2.axvline(x=noise_right/delta,color='b',linestyle='dashed')
+            ax_r2.legend(['%s' %event3])
+            ax_r2.grid()
+            
+            ax_r3 = fig.add_subplot(10,1,3)
+            ax_r3.plot(tr_n_onlydeci.times('relative'),tr_n_onlydeci.data)
+            ax_r3.set_ylabel('Raw N, %0.2f' %SNR_N_onlydeci,fontsize=14)
+            ax_r3.set_xlim([60,200])
+            ax_r3.axvline(x=sparr,color='r')
+            ax_r3.axvline(x=sig_right/delta,color='r',linestyle='dashed')
+            ax_r3.axvline(x=sig_left/delta,color='r',linestyle='dashed')
+            ax_r3.axvline(x=noise_left/delta,color='b',linestyle='dashed')
+            ax_r3.axvline(x=noise_right/delta,color='b',linestyle='dashed')
+            ax_r3.legend(['%s' %event4])
+            ax_r3.grid()
+            
+            ax1 = fig.add_subplot(10,1,4)
+            ax1.plot(st_z[0].times('relative'),st_z[0].data)
+            ax1.set_ylabel('Z, %0.2f' %SNR_Z,fontsize=14)
+            ax1.axvline(x=sparr,color='r')
+            ax1.axvline(x=sig_right/delta,color='r',linestyle='dashed')
+            ax1.axvline(x=sig_left/delta,color='r',linestyle='dashed')
+            ax1.axvline(x=noise_left/delta,color='b',linestyle='dashed')
+            ax1.axvline(x=noise_right/delta,color='b',linestyle='dashed')
+            ax1.set_xlim([60,200])            
+            ax1.grid()
+            
+            #plotting other components
+            st_r = read(r_files[z])
+            
+            eve3 = r_files[z]
+            eve3 = eve3.split('/')
+            event3 = eve3[7].split('_BG')
+            event3 = event3[0]
+            
+            tr_r = st_r[0]
+            #tr_e.filter('bandpass',freqmin=0.25,freqmax=5,zerophase=True,corners=4)
+            st_t = read(t_files[z])
+            
+            eve4 = t_files[z]
+            eve4 = eve4.split('/')
+            event4 = eve4[7].split('_BG')
+            event4 = event4[0]
+            
+            tr_t = st_t[0]
+            #tr_n.filter('bandpass',freqmin=0.25,freqmax=5,zerophase=True,corners=4)
+            
+            st_bz = read(z_files[z])
+            tr_bz = st_bz[0]
+            
+            ax2 = fig.add_subplot(10,1,5)
+            ax2.plot(tr_e.times('relative'),tr_e.data/np.max(tr_e.data))
+            #ax2.set_ylabel('Radial %s' %event3)
+            ax2.set_ylabel('E, %0.2f' %SNR_E,fontsize=14)
+            #ax2.axvline(x=parr,color='r')
+            ax2.axvline(x=sparr,color='r')
+            ax2.axvline(x=sig_right/delta,color='r',linestyle='dashed')
+            ax2.axvline(x=sig_left/delta,color='r',linestyle='dashed')
+            ax2.axvline(x=noise_left/delta,color='b',linestyle='dashed')
+            ax2.axvline(x=noise_right/delta,color='b',linestyle='dashed')
+            ax2.set_xlim([60,200])
+            ax2.set_xticks([])
+            ax2.grid()
+        
+            ax3 = fig.add_subplot(10,1,6)
+            ax3.plot(tr_n.times('relative'),tr_n.data/np.max(tr_n.data))
+            #ax3.set_ylabel('Transverse %s' %event4)
+            ax3.set_ylabel('N, %0.2f' %SNR_N,fontsize=14)
+            #ax3.axvline(x=parr,color='r')
+            ax3.axvline(x=sparr,color='r')
+            ax3.axvline(x=sig_right/delta,color='r',linestyle='dashed')
+            ax3.axvline(x=sig_left/delta,color='r',linestyle='dashed')
+            ax3.axvline(x=noise_left/delta,color='b',linestyle='dashed')
+            ax3.axvline(x=noise_right/delta,color='b',linestyle='dashed')
+            ax3.set_xlim([60,200])
+            ax3.set_xticks([])
+            ax3.grid()
+            
+            ax4 = fig.add_subplot(10,1,7)
+            #ax4.plot(tr_bz.times('relative'),tr_bz.data/np.max(tr_bz.data))
+            ax4.plot(tr_bz)
+            #ax2.set_ylabel('Radial %s' %event3)
+            ax4.set_ylabel('Z',fontsize=14)
+            ax4.set_xlim([0,140*delta])
+            ax4.set_xticks([])
+            ax4.grid()
+            
+            ax5 = fig.add_subplot(10,1,8)
+            #ax5.plot(tr_r.times('relative'),tr_r.data/np.max(tr_r.data))
+            ax5.plot(tr_r)
+            #ax2.set_ylabel('Radial %s' %event3)
+            ax5.set_ylabel('Radial',fontsize=14)
+            ax5.set_xlim([0,140*delta])
+            ax5.set_xticks([])
+            ax5.grid()
+            
+            ax6 = fig.add_subplot(10,1,9)
+            #ax6.plot(tr_t.times('relative'),tr_t.data/np.max(tr_r.data))
+            ax6.plot(tr_t)
+            #ax3.set_ylabel('Transverse %s' %event4)
+            ax6.set_ylabel('Transverse',fontsize=14)
+            ax6.set_xlim([0,140*delta])
+            ax6.set_xticks([])
+            ax6.grid()
+        
+               
+            ax = fig.add_subplot(10,1,10)
+            ax.plot(tr_full.times('relative'),tr_full.data)
+            ax.plot(ind/20,peak,'*',markersize=12)
+            ax.axvline(x=trim,color='r',linestyle='dashed')
+            ax.axhline(y=0,color='r',linestyle='dashed')
+            ax.set_xlim([0,trim])
+            ax.set_title('%s, baz = %d, ray_p = %0.3f' %(word,st_z[0].stats.sac.baz,st_z[0].stats.sac.user4), fontsize=14)
+            #ax.set_ylabel('%s' %event, fontsize=14)
+            ax.set_ylabel('Reciever Function',fontsize=14)
+            ax.set_xlabel('Seconds',fontsize=14)
+            #print('%s' %event)
+            
+            for tick in ax1.xaxis.get_major_ticks():
+                tick.label.set_fontsize(14)
+                    
+            for tick in ax1.yaxis.get_major_ticks():
+                tick.label.set_fontsize(14)
+                
+            for tick in ax2.xaxis.get_major_ticks():
+                tick.label.set_fontsize(14)
+                    
+            for tick in ax2.yaxis.get_major_ticks():
+                tick.label.set_fontsize(14)
+                
+            for tick in ax3.xaxis.get_major_ticks():
+                tick.label.set_fontsize(14)
+                    
+            for tick in ax3.yaxis.get_major_ticks():
+                tick.label.set_fontsize(14)
+                
+            for tick in ax.xaxis.get_major_ticks():
+                tick.label.set_fontsize(14)
+                    
+            for tick in ax.yaxis.get_major_ticks():
+                tick.label.set_fontsize(14)
+              
+                #if word == 'keep':
+                    #keep_ind.append(fi_num)
+        
+          ''' 
+            
+    keep_count = len(keep_ind)        
+    print('Kept %d traces' %keep_count)
+    kept_tra = np.empty([keep_count,len(tr_full)])
+    
+    
+    #plt.figure()
+    scale = 0.01
+    #count = 0
+    #for p in keep_ind:
+    
+
+    evlas = []
+    evlos = []
+    mags = []
+    depths = []
+
+    
+    for t in range(0,keep_count):
+        kf = ITR_files[keep_ind[t]]
+        kt = ITT_files[keep_ind[t]]
+        sti_full = read(kf)
+        stt_full = read(kt)
+        tra=sti_full[0]
+        trat = stt_full[0]
+        kept_tra[t,:] = tra.data
+        baz = tra.stats.sac.baz
+        evlas.append(tra.stats.sac.evla)
+        evlos.append(tra.stats.sac.evlo)
+        mags.append(tra.stats.sac.mag)
+        depths.append(tra.stats.sac.evdp/1000)
+        
+
+        #add in station elevation information
+        for u in range(0,len(df)):
+            if df.Station[u] == tra.stats.station:
+                tra.stats.sac.stel = df.Ele[u]
+                trat.stats.sac.stel = df.Ele[u]
+        
+        #print(tra.stats.sac.baz)
+        #write out rad and tan files with new name
+        
+        tra.write(ITR_files[keep_ind[t]]+'_new_SNRcomb_keep',format='SAC')
+        trat.write(ITT_files[keep_ind[t]]+'_new_SNRcomb_keep',format='SAC')
